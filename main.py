@@ -209,9 +209,12 @@ async def publish_once(uid: int) -> tuple[bool, str]:
             return False, "Your Telegram authorization has expired. Please reconnect Telegram."
         await client.send_file(TARGET_CHAT, [str(p) for p in state.photos], caption=caption(state.values))
         return True, ""
-    except Exception:
+    except Exception as exc:
         log.exception("Publishing failed for bot user %s", uid)
-        return False, f"Could not publish the listing. Make sure your Telegram account has permission to post in {TARGET_CHAT}."
+        error_name = type(exc).__name__
+        error_text = str(exc).strip()
+        detail = f"{error_name}: {error_text}" if error_text else error_name
+        return False, f"Could not publish the listing.\n\nTelegram error: {detail}\n\nMake sure the connected account is an administrator with permission to post in {TARGET_CHAT}."
     finally:
         await client.disconnect()
 
@@ -223,7 +226,10 @@ async def repeat_listing(event):
         while True:
             ok, error = await publish_once(uid)
             if not ok:
-                await event.respond(f"❌ {error}")
+                await event.respond(
+                    f"❌ {error}\n\nYour listing was kept, so you can fix the problem and retry.",
+                    buttons=[[Button.inline("🔄 Retry Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]],
+                )
                 break
             next_send = time.monotonic() + 18 * 60
             if status is None:
@@ -247,7 +253,6 @@ async def repeat_listing(event):
         raise
     finally:
         schedule_tasks.pop(uid, None)
-        cleanup(uid, cancel_schedule=False)
 
 
 @bot.on(events.NewMessage(pattern=r"^/start$"))
