@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
+from PIL import Image, ImageOps
 
 ALLOWED_HOSTS = {"myhome.ge", "www.myhome.ge", "home.ss.ge", "ss.ge", "www.ss.ge"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
@@ -155,9 +155,24 @@ def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
     return values, images
 
 
+def _image_fingerprint(image: Image.Image) -> int:
+    """Create a fingerprint that is stable across resized copies of a photo."""
+    normalized = ImageOps.exif_transpose(image).convert("L").resize((17, 16))
+    pixels = list(normalized.getdata())
+    fingerprint = 0
+    for row in range(16):
+        offset = row * 17
+        for column in range(16):
+            fingerprint = (fingerprint << 1) | (
+                pixels[offset + column] > pixels[offset + column + 1]
+            )
+    return fingerprint
+
+
 def download_images(urls: list[str], folder: Path) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
+    fingerprints = []
     for url in urls:
         if len(paths) >= 10:
             break
@@ -169,6 +184,10 @@ def download_images(urls: list[str], folder: Path) -> list[Path]:
             image = Image.open(BytesIO(response.content))
             if image.width < 300 or image.height < 200:
                 continue
+            fingerprint = _image_fingerprint(image)
+            if any((fingerprint ^ existing).bit_count() <= 8 for existing in fingerprints):
+                continue
+            fingerprints.append(fingerprint)
             path = folder / f"imported-{len(paths) + 1}.jpg"
             path.write_bytes(response.content)
             paths.append(path)
