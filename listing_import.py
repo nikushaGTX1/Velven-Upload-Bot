@@ -1,10 +1,12 @@
 import json
 import re
+from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 
 ALLOWED_HOSTS = {"myhome.ge", "www.myhome.ge", "home.ss.ge", "ss.ge", "www.ss.ge"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
@@ -78,6 +80,33 @@ def _rooms_from_url(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def _image_candidates(value, preferred=False):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from _image_candidates(child, preferred or any(word in key.casefold() for word in ("image", "photo", "gallery")))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _image_candidates(child, preferred)
+    elif preferred and isinstance(value, str):
+        for candidate in re.findall(r"https?://[^\s\"'<>]+", value.replace("\\/", "/")):
+            yield candidate
+
+
+def _add_image(images: list[str], source: str | None, page_url: str):
+    if not source:
+        return
+    source = source.strip().replace("\\/", "/")
+    source = source.split()[0]
+    absolute = urljoin(page_url, source)
+    lowered = absolute.casefold()
+    if urlparse(absolute).scheme not in {"http", "https"}:
+        return
+    if any(word in lowered for word in ("logo", "icon", "avatar", "banner", "marker", "placeholder", ".svg")):
+        return
+    if absolute not in images:
+        images.append(absolute)
+
+
 def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
     response = requests.get(url, headers=HEADERS, timeout=25)
     response.raise_for_status()
@@ -112,36 +141,37 @@ def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
     if values["floor"] and total_floors and "/" not in values["floor"]:
         values["floor"] += f"/{total_floors}"
     images = []
+    # Gallery data is normally embedded in the sites' application JSON and
+    # contains the complete set, unlike og:image which contains only one.
+    for candidate in _image_candidates(objects):
+        _add_image(images, candidate, response.url)
     for tag in soup.select('meta[property="og:image"], meta[name="twitter:image"], img'):
-        source = tag.get("content") or tag.get("src") or tag.get("data-src")
-        if source and source.startswith("http") and source not in images:
-            images.append(source)
-    for obj in objects:
-        for key, value in obj.items():
-            if any(word in key.casefold() for word in ("image", "photo")):
-                candidates = value if isinstance(value, list) else [value]
-                for candidate in candidates:
-                    if isinstance(candidate, str) and candidate.startswith("http") and candidate not in images:
-                        images.append(candidate)
-                    elif isinstance(candidate, dict):
-                        source = candidate.get("url") or candidate.get("src")
-                        if isinstance(source, str) and source.startswith("http") and source not in images:
-                            images.append(source)
-    return values, images[:10]
+        for attribute in ("content", "data-src", "data-lazy-src", "src"):
+            _add_image(images, tag.get(attribute), response.url)
+        srcset = tag.get("srcset") or tag.get("data-srcset")
+        if srcset:
+            for item in srcset.split(","):
+                _add_image(images, item.strip().split()[0], response.url)
+    return values, images
 
 
 def download_images(urls: list[str], folder: Path) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
-    for number, url in enumerate(urls, 1):
+    for url in urls:
+        if len(paths) >= 10:
+            break
         try:
             response = requests.get(url, headers=HEADERS, timeout=25)
             response.raise_for_status()
             if not response.headers.get("content-type", "").startswith("image/"):
                 continue
-            path = folder / f"imported-{number}.jpg"
+            image = Image.open(BytesIO(response.content))
+            if image.width < 300 or image.height < 200:
+                continue
+            path = folder / f"imported-{len(paths) + 1}.jpg"
             path.write_bytes(response.content)
             paths.append(path)
-        except requests.RequestException:
+        except (requests.RequestException, OSError):
             continue
     return paths
