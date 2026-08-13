@@ -93,26 +93,37 @@ async def ask_field(event, state: Listing):
 async def connect_qr(event):
     uid = event.sender_id
     client = TelegramClient(StringSession(), API_ID, API_HASH)
+    qr_message = None
     try:
         await client.connect()
         qr = await client.qr_login()
-        image = qrcode.make(qr.url)
-        data = io.BytesIO()
-        image.save(data, format="PNG")
-        data.seek(0)
-        data.name = "telegram-login.png"
-        await event.respond(
-            "Scan this QR in Telegram: Settings → Devices → Link Desktop Device.\n\nThe QR expires shortly. Never send login codes or passwords here.",
-            file=data,
-        )
-        try:
-            await qr.wait(timeout=120)
-        except SessionPasswordNeededError:
-            await event.respond("❌ This account requires a 2FA password. For security, passwords cannot be entered in this bot chat. Disable 2FA temporarily or connect using a trusted local setup, then try again.")
-            return
-        except asyncio.TimeoutError:
-            await event.respond("❌ The QR code expired. Press Connect Telegram to try again.")
-            return
+        login_deadline = time.monotonic() + 5 * 60
+        while True:
+            image = qrcode.make(qr.url)
+            data = io.BytesIO()
+            image.save(data, format="PNG")
+            data.seek(0)
+            data.name = "telegram-login.png"
+            if qr_message:
+                try:
+                    await qr_message.delete()
+                except Exception:
+                    log.warning("Could not remove expired QR for bot user %s", uid)
+            qr_message = await event.respond(
+                "Scan this QR now in Telegram: Settings → Devices → Link Desktop Device.\n\nIt refreshes automatically when it expires. Never send login codes or passwords here.",
+                file=data,
+            )
+            try:
+                await qr.wait()
+                break
+            except asyncio.TimeoutError:
+                if time.monotonic() >= login_deadline:
+                    await event.respond("❌ QR login timed out after 5 minutes. Press Connect Telegram to try again.")
+                    return
+                await qr.recreate()
+            except SessionPasswordNeededError:
+                await event.respond("❌ This account requires a 2FA password. For security, passwords cannot be entered in this bot chat. Disable 2FA temporarily or connect using a trusted local setup, then try again.")
+                return
         me = await client.get_me()
         name = " ".join(filter(None, [me.first_name, me.last_name])) or "Telegram user"
         save_user(uid, me.id, me.username, name, client.session.save())
