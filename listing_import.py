@@ -9,6 +9,19 @@ from bs4 import BeautifulSoup
 ALLOWED_HOSTS = {"myhome.ge", "www.myhome.ge", "home.ss.ge", "ss.ge", "www.ss.ge"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
+DISTRICTS_IN_URL = {
+    "saburtalo": "saburtalo", "saburtaloze": "saburtalo",
+    "vake": "vake", "vakeshi": "vake",
+    "isani": "isani", "isanshi": "isani",
+    "samgori": "samgori", "samgorshi": "samgori",
+    "gldani": "gldani", "gldanshi": "gldani",
+    "didube": "didube", "didubeshi": "didube",
+    "chugureti": "chugureti", "chuguretshi": "chugureti",
+    "nadzaladevi": "nadzaladevi", "nadzaladevshi": "nadzaladevi",
+    "mtatsminda": "mtatsminda", "mtatsmindaze": "mtatsminda",
+    "krtsanisi": "krtsanisi", "krtsanisshi": "krtsanisi",
+}
+
 
 def supported_url(text: str) -> str | None:
     match = re.search(r"https?://[^\s<>()]+", text or "")
@@ -37,12 +50,32 @@ def _find(objects, names):
     return ""
 
 
+def _find_number(objects, names):
+    value = _find(objects, names)
+    match = re.search(r"\d+(?:[.,]\d+)?", value)
+    return match.group(0) if match else ""
+
+
 def _match(text, patterns):
     for pattern in patterns:
         found = re.search(pattern, text, re.I)
         if found:
             return found.group(1).strip()
     return ""
+
+
+def _district_from_url(url: str) -> str:
+    slug = urlparse(url).path.casefold()
+    parts = set(filter(None, re.split(r"[^a-z]+", slug)))
+    for token, district in DISTRICTS_IN_URL.items():
+        if token in parts:
+            return district
+    return ""
+
+
+def _rooms_from_url(url: str) -> str:
+    match = re.search(r"/(?:[^/?#]*-)?(\d+)-otaxiani(?:-|/|$)", urlparse(url).path.casefold())
+    return match.group(1) if match else ""
 
 
 def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
@@ -65,17 +98,17 @@ def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
     combined = f"{title} {text}"
     values = {
         "city": _find(objects, ["city", "cityName", "city_name"]) or _match(combined, [r"(თბილისი|ბათუმი|ქუთაისი|რუსთავი|Tbilisi|Batumi|Kutaisi|Rustavi)"]),
-        "district": _find(objects, ["district", "districtName", "district_name", "subdistrictName"]) or _match(combined, [r"(საბურთალო|ვაკე|ისანი|სამგორი|გლდანი|დიდუბე|ჩუღურეთი|ნაძალადევი|მთაწმინდა|კრწანისი)"]),
-        "size": _find(objects, ["area", "totalArea", "total_area", "space"]) or _match(combined, [r"([\d.,]+)\s*(?:მ²|m²|sq\.?\s*m)"]),
-        "floor": _find(objects, ["floor", "floorNumber", "floor_number"]),
+        "district": _district_from_url(url) or _match(combined, [r"(საბურთალო|ვაკე|ისანი|სამგორი|გლდანი|დიდუბე|ჩუღურეთი|ნაძალადევი|მთაწმინდა|კრწანისი)"]) or _find(objects, ["districtName", "district_name", "subdistrictName"]),
+        "size": _find_number(objects, ["area", "totalArea", "total_area", "space"]) or _match(combined, [r"([\d.,]+)\s*(?:მ²|m²|sq\.?\s*m)"]),
+        "floor": _find_number(objects, ["floor", "floorNumber", "floor_number"]),
         "building": _find(objects, ["buildingStatus", "building_status", "condition"]),
-        "rooms": _find(objects, ["rooms", "roomCount", "roomsCount", "room_count"]) or _match(combined, [r"(\d+)\s*(?:ოთახიანი|ოთახი)"]),
-        "bedrooms": _find(objects, ["bedrooms", "bedroomCount", "bedroomsCount", "bedroom_count"]),
-        "elevator": _find(objects, ["elevators", "elevatorCount", "elevator_count"]),
-        "price": _find(objects, ["price", "priceUsd", "price_usd"]),
+        "rooms": _rooms_from_url(url) or _find_number(objects, ["rooms", "roomCount", "roomsCount", "room_count"]) or _match(combined, [r"(\d+)\s*(?:ოთახიანი|ოთახი|ოთახები)", r"(?:ოთახები|ოთახი)\s*[:\-]?\s*(\d+)"]),
+        "bedrooms": _find_number(objects, ["bedrooms", "bedroomCount", "bedroomsCount", "bedroom_count"]) or _match(combined, [r"(\d+)\s*(?:საძინებელი|საძინებლები)", r"(?:საძინებლები|საძინებელი)\s*[:\-]?\s*(\d+)"]),
+        "elevator": _find_number(objects, ["elevators", "elevatorCount", "elevator_count"]),
+        "price": _find_number(objects, ["price", "priceUsd", "price_usd"]),
         "pets": _find(objects, ["pets", "petsAllowed", "pets_allowed"]),
     }
-    total_floors = _find(objects, ["totalFloors", "floors", "total_floors"])
+    total_floors = _find_number(objects, ["totalFloors", "floors", "total_floors"])
     if values["floor"] and total_floors and "/" not in values["floor"]:
         values["floor"] += f"/{total_floors}"
     images = []

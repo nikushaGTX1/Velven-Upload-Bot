@@ -11,6 +11,7 @@ def connect():
 
 
 def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS users (
             bot_user_id INTEGER PRIMARY KEY,
