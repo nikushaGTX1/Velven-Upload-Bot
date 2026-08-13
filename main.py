@@ -15,6 +15,7 @@ from telethon.sessions import StringSession
 from config import API_HASH, API_ID, BOT_TOKEN, TARGET_CHAT, UPLOADS_DIR
 from crypto_utils import decrypt_session
 from database import delete_user, get_user, init_db, save_user
+from listing_import import download_images, scrape_listing, supported_url
 from translations import translate_listing_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -56,7 +57,7 @@ async def show_menu(event, edit=False):
     user = get_user(event.sender_id)
     if user:
         username = f" (@{user['telegram_username']})" if user["telegram_username"] else ""
-        text = f"🏠 Velven Upload Bot\n\n✅ Connected as: {user['telegram_name']}{username}\n\nCreate an apartment listing below."
+        text = f"🏠 Velven Upload Bot\n\n✅ Connected as: {user['telegram_name']}{username}\n\nCreate a listing below, or send a public MyHome.ge or SS.ge listing link to import it automatically."
     else:
         text = "🏠 Velven Upload Bot\n\nConnect your Telegram account before creating a listing."
     method = event.edit if edit else event.respond
@@ -99,6 +100,49 @@ def is_image_upload(event) -> bool:
 async def ask_field(event, state: Listing):
     _, prompt = FIELDS[state.step]
     await event.respond(f"Step {state.step + 1}/10\n\n{prompt}", buttons=[[Button.inline("❌ Cancel", b"cancel")]])
+
+
+async def continue_form(event, state: Listing):
+    while state.step < len(FIELDS) and state.values.get(FIELDS[state.step][0]):
+        state.step += 1
+    if state.step < len(FIELDS):
+        await ask_field(event, state)
+    else:
+        await translate_listing_fields(state.values)
+        await event.respond(f"👀 Preview\n\n{caption(state.values)}\n\nPublish this listing?", buttons=[[Button.inline("✅ Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
+
+
+async def import_listing(event, url: str):
+    uid = event.sender_id
+    if not get_user(uid):
+        await event.respond("Connect your Telegram account before importing a listing.")
+        return
+    if uid in schedule_tasks:
+        await event.respond("Stop your active automatic listing before importing another one.")
+        return
+    cleanup(uid)
+    progress = await event.respond("🔎 Importing the listing and its photos. This may take a moment...")
+    try:
+        values, image_urls = await asyncio.to_thread(scrape_listing, url)
+        photos = await asyncio.to_thread(download_images, image_urls, UPLOADS_DIR / str(uid))
+    except Exception:
+        log.exception("Could not import listing for bot user %s from %s", uid, url)
+        await progress.edit("❌ Could not read this listing. Make sure the link is public and still available.")
+        return
+    state = Listing(photos=photos, values={key: value for key, value in values.items() if value})
+    states[uid] = state
+    missing = [key for key, _ in FIELDS if not state.values.get(key)]
+    if not state.photos:
+        state.step = -1
+        await progress.edit("The details were imported, but no listing photos could be downloaded. Send up to 10 photos, then press Done.", buttons=[[Button.inline("✅ Done", b"done"), Button.inline("❌ Cancel", b"cancel")]])
+    elif missing:
+        state.step = next(i for i, (key, _) in enumerate(FIELDS) if key in missing)
+        await progress.edit(f"✅ Imported {len(state.photos)} photo(s) and available details. Please enter the missing information.")
+        await ask_field(event, state)
+    else:
+        state.step = len(FIELDS)
+        await translate_listing_fields(state.values)
+        await progress.edit(f"👀 Imported Preview\n\n{caption(state.values)}\n\nPublish this listing?", buttons=[[Button.inline("✅ Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
 
 
 async def connect_qr(event):
@@ -252,7 +296,7 @@ async def callbacks(event):
             await event.respond("Please send at least one photo before pressing Done.")
             return
         state.step = 0
-        await ask_field(event, state)
+        await continue_form(event, state)
     elif action == b"cancel":
         cleanup(uid)
         await event.respond("❌ Listing cancelled.")
@@ -276,6 +320,10 @@ async def callbacks(event):
 @bot.on(events.NewMessage)
 async def messages(event):
     if event.raw_text.startswith("/start"):
+        return
+    url = supported_url(event.raw_text)
+    if url:
+        await import_listing(event, url)
         return
     uid, state = event.sender_id, states.get(event.sender_id)
     if not state:
@@ -309,11 +357,7 @@ async def messages(event):
     key, _ = FIELDS[state.step]
     state.values[key] = event.raw_text.strip()
     state.step += 1
-    if state.step < len(FIELDS):
-        await ask_field(event, state)
-    else:
-        await translate_listing_fields(state.values)
-        await event.respond(f"👀 Preview\n\n{caption(state.values)}\n\nPublish this listing?", buttons=[[Button.inline("✅ Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
+    await continue_form(event, state)
 
 
 async def main():
