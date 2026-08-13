@@ -44,7 +44,7 @@ class Listing:
 states: dict[int, Listing] = {}
 qr_tasks: dict[int, asyncio.Task] = {}
 schedule_tasks: dict[int, asyncio.Task] = {}
-album_ids: set[tuple[int, int]] = set()
+photo_locks: dict[int, asyncio.Lock] = {}
 bot = TelegramClient("velven_bot", API_ID, API_HASH)
 
 
@@ -83,6 +83,17 @@ def caption(values: dict[str, str]) -> str:
         f"🛏️ Спальни: {values['bedrooms']}", f"🏗️ Лифт: {values['elevator']}",
         f"💸 Цена: {price}", f"🐶 Животные: {values['pets']}",
     ])
+
+
+def is_image_upload(event) -> bool:
+    if event.photo:
+        return True
+    mime_type = (getattr(event.file, "mime_type", None) or "").lower()
+    filename = (getattr(event.file, "name", None) or "").lower()
+    return bool(event.document) and (
+        mime_type.startswith("image/")
+        or filename.endswith((".jpg", ".jpeg", ".png", ".webp"))
+    )
 
 
 async def ask_field(event, state: Listing):
@@ -270,23 +281,27 @@ async def messages(event):
     if not state:
         return
     if state.step == -1:
-        if not event.photo:
-            await event.respond("Please send a photo, or use Done or Cancel.")
+        if not is_image_upload(event):
+            await event.respond("Please send a photo or an image file (JPG, PNG, or WebP), or use Done or Cancel.")
             return
-        if event.grouped_id:
-            key = (uid, event.id)
-            if key in album_ids:
+        lock = photo_locks.setdefault(uid, asyncio.Lock())
+        async with lock:
+            # Album items arrive concurrently, so enforce the limit inside
+            # the per-user lock and recheck that this listing is still active.
+            if states.get(uid) is not state or state.step != -1:
                 return
-            album_ids.add(key)
-        if len(state.photos) >= 10:
-            await event.respond("You already added the maximum of 10 photos.")
-            return
-        folder = UPLOADS_DIR / str(uid)
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{uuid.uuid4().hex}.jpg"
-        await event.download_media(file=str(path))
-        state.photos.append(path)
-        await event.respond(f"📸 Photo added ({len(state.photos)}/10)")
+            if len(state.photos) >= 10:
+                await event.respond("You already added the maximum of 10 photos.")
+                return
+            folder = UPLOADS_DIR / str(uid)
+            folder.mkdir(parents=True, exist_ok=True)
+            suffix = Path(getattr(event.file, "name", "") or "").suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+                suffix = ".jpg"
+            path = folder / f"{uuid.uuid4().hex}{suffix}"
+            await event.download_media(file=str(path))
+            state.photos.append(path)
+            await event.respond(f"📸 Photo added ({len(state.photos)}/10)")
         return
     if not event.raw_text:
         await event.respond("Please enter a text value.")
