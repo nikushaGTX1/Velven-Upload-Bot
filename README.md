@@ -22,8 +22,8 @@ A Telethon bot that lets users securely connect their own Telegram account by QR
 9. Run: `python main.py`
 10. Open `@velven_upload_bot` and send `/start`.
 11. Connect Telegram by scanning the QR from Telegram Settings → Devices → Link Desktop Device.
-12. Create a listing.
-13. Publish it to `@tbilisi_arendaa`.
+12. Create a listing, then use **Add another listing** to build an unlimited queue.
+13. Start automatic posting. The bot sends each listing in order with an 18-minute cooldown, then repeats from the first listing.
 
 The connected user account must have permission to post in the target channel. Login codes and 2FA passwords are never accepted in bot chat. Stored `StringSession` values are encrypted in SQLite.
 

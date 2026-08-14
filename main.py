@@ -43,6 +43,7 @@ class Listing:
 
 
 states: dict[int, Listing] = {}
+listing_queues: dict[int, list[Listing]] = {}
 qr_tasks: dict[int, asyncio.Task] = {}
 schedule_tasks: dict[int, asyncio.Task] = {}
 photo_locks: dict[int, asyncio.Lock] = {}
@@ -55,22 +56,62 @@ def menu_buttons(connected: bool):
 
 async def show_menu(event, edit=False):
     user = get_user(event.sender_id)
+    queued = len(listing_queues.get(event.sender_id, []))
     if user:
         username = f" (@{user['telegram_username']})" if user["telegram_username"] else ""
-        text = f"🏠 Velven Upload Bot\n\n✅ Connected as: {user['telegram_name']}{username}\n\nCreate a listing below, or send a public MyHome.ge or SS.ge listing link to import it automatically."
+        if queued:
+            text = (
+                f"🏠 Velven Upload Bot\n\n✅ Connected as: {user['telegram_name']}{username}\n\n"
+                f"You have {queued} listing(s) ready to post."
+            )
+        else:
+            text = f"🏠 Velven Upload Bot\n\n✅ Connected as: {user['telegram_name']}{username}\n\nCreate a listing below, or send a public MyHome.ge or SS.ge listing link to import it automatically."
     else:
         text = "🏠 Velven Upload Bot\n\nConnect your Telegram account before creating a listing."
     method = event.edit if edit else event.respond
-    await method(text, buttons=menu_buttons(bool(user)))
+    buttons = (
+        [
+            [Button.inline("➕ Add another listing", b"add_another")],
+            [Button.inline("▶️ Start automatic posting", b"start_schedule")],
+            [Button.inline("❌ Cancel all", b"cancel")],
+        ]
+        if user and queued and event.sender_id not in schedule_tasks
+        else menu_buttons(bool(user))
+    )
+    await method(text, buttons=buttons)
+
+
+def cleanup_draft(user_id: int):
+    states.pop(user_id, None)
 
 
 def cleanup(user_id: int, cancel_schedule: bool = True):
     task = schedule_tasks.pop(user_id, None) if cancel_schedule else None
     if task and task is not asyncio.current_task():
         task.cancel()
-    state = states.pop(user_id, None)
-    if state:
-        shutil.rmtree(UPLOADS_DIR / str(user_id), ignore_errors=True)
+    states.pop(user_id, None)
+    listing_queues.pop(user_id, None)
+    shutil.rmtree(UPLOADS_DIR / str(user_id), ignore_errors=True)
+
+
+def new_listing(user_id: int) -> Listing:
+    state = Listing()
+    states[user_id] = state
+    return state
+
+
+async def show_queue(event):
+    count = len(listing_queues.get(event.sender_id, []))
+    await event.respond(
+        f"✅ Listing added. You now have {count} listing(s).\n\n"
+        "Add another listing, or start automatic posting. Listings will be sent "
+        "in order, 18 minutes apart, and repeat continuously.",
+        buttons=[
+            [Button.inline("➕ Add another listing", b"add_another")],
+            [Button.inline("▶️ Start automatic posting", b"start_schedule")],
+            [Button.inline("❌ Cancel all", b"cancel")],
+        ],
+    )
 
 
 def caption(values: dict[str, str]) -> str:
@@ -109,7 +150,7 @@ async def continue_form(event, state: Listing):
         await ask_field(event, state)
     else:
         await translate_listing_fields(state.values)
-        await event.respond(f"👀 Preview\n\n{caption(state.values)}\n\nPublish this listing?", buttons=[[Button.inline("✅ Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
+        await event.respond(f"👀 Preview\n\n{caption(state.values)}\n\nAdd this listing to the queue?", buttons=[[Button.inline("✅ Add listing", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
 
 
 async def import_listing(event, url: str):
@@ -120,11 +161,11 @@ async def import_listing(event, url: str):
     if uid in schedule_tasks:
         await event.respond("Stop your active automatic listing before importing another one.")
         return
-    cleanup(uid)
+    cleanup_draft(uid)
     progress = await event.respond("🔎 Importing the listing and its photos. This may take a moment...")
     try:
         values, image_urls = await asyncio.to_thread(scrape_listing, url)
-        photos = await asyncio.to_thread(download_images, image_urls, UPLOADS_DIR / str(uid))
+        photos = await asyncio.to_thread(download_images, image_urls, UPLOADS_DIR / str(uid) / uuid.uuid4().hex)
     except Exception:
         log.exception("Could not import listing for bot user %s from %s", uid, url)
         await progress.edit("❌ Could not read this listing. Make sure the link is public and still available.")
@@ -142,7 +183,7 @@ async def import_listing(event, url: str):
     else:
         state.step = len(FIELDS)
         await translate_listing_fields(state.values)
-        await progress.edit(f"👀 Imported Preview\n\n{caption(state.values)}\n\nPublish this listing?", buttons=[[Button.inline("✅ Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
+        await progress.edit(f"👀 Imported Preview\n\n{caption(state.values)}\n\nAdd this listing to the queue?", buttons=[[Button.inline("✅ Add listing", b"publish"), Button.inline("❌ Cancel", b"cancel")]])
 
 
 async def connect_qr(event):
@@ -192,14 +233,17 @@ async def connect_qr(event):
         qr_tasks.pop(uid, None)
 
 
-def countdown_text(seconds: int) -> str:
+def countdown_text(seconds: int, next_listing: int, total: int) -> str:
     minutes, seconds = divmod(max(0, seconds), 60)
-    return f"⏳ Next post in {minutes:02d}:{seconds:02d}.\n\nThis listing will be posted every 18 minutes."
+    return (
+        f"⏳ Next post: listing {next_listing}/{total} in {minutes:02d}:{seconds:02d}.\n\n"
+        "Listings repeat in order every 18 minutes."
+    )
 
 
-async def publish_once(uid: int) -> tuple[bool, str]:
-    state, user = states.get(uid), get_user(uid)
-    if not state or not user:
+async def publish_once(uid: int, listing: Listing) -> tuple[bool, str]:
+    user = get_user(uid)
+    if not user:
         return False, "Listing or account connection not found."
     client = TelegramClient(StringSession(decrypt_session(user["encrypted_session"])), API_ID, API_HASH)
     try:
@@ -207,7 +251,7 @@ async def publish_once(uid: int) -> tuple[bool, str]:
         if not await client.is_user_authorized():
             delete_user(uid)
             return False, "Your Telegram authorization has expired. Please reconnect Telegram."
-        await client.send_file(TARGET_CHAT, [str(p) for p in state.photos], caption=caption(state.values))
+        await client.send_file(TARGET_CHAT, [str(p) for p in listing.photos], caption=caption(listing.values))
         return True, ""
     except Exception as exc:
         log.exception("Publishing failed for bot user %s", uid)
@@ -222,19 +266,28 @@ async def publish_once(uid: int) -> tuple[bool, str]:
 async def repeat_listing(event):
     uid = event.sender_id
     status = None
+    index = 0
     try:
         while True:
-            ok, error = await publish_once(uid)
+            queue = listing_queues.get(uid, [])
+            if not queue:
+                await event.respond("No listings are queued.")
+                break
+            listing_number = index + 1
+            ok, error = await publish_once(uid, queue[index])
             if not ok:
                 await event.respond(
                     f"❌ {error}\n\nYour listing was kept, so you can fix the problem and retry.",
-                    buttons=[[Button.inline("🔄 Retry Publish", b"publish"), Button.inline("❌ Cancel", b"cancel")]],
+                    buttons=[[Button.inline("🔄 Retry", b"start_schedule"), Button.inline("❌ Cancel all", b"cancel")]],
                 )
                 break
+            index = (index + 1) % len(queue)
+            next_listing = index + 1
             next_send = time.monotonic() + 18 * 60
             if status is None:
                 status = await event.respond(
-                    f"✅ Listing published to {TARGET_CHAT}.\n\n{countdown_text(18 * 60)}",
+                    f"✅ Listing {listing_number}/{len(queue)} published to {TARGET_CHAT}.\n\n"
+                    f"{countdown_text(18 * 60, next_listing, len(queue))}",
                     buttons=[[Button.inline("⏹ Stop automatic posting", b"stop_schedule")]],
                 )
             while True:
@@ -243,7 +296,8 @@ async def repeat_listing(event):
                     break
                 try:
                     await status.edit(
-                        f"✅ Automatic posting is active for {TARGET_CHAT}.\n\n{countdown_text(remaining)}",
+                        f"✅ Automatic posting is active for {TARGET_CHAT}.\n\n"
+                        f"{countdown_text(remaining, next_listing, len(queue))}",
                         buttons=[[Button.inline("⏹ Stop automatic posting", b"stop_schedule")]],
                     )
                 except Exception:
@@ -258,7 +312,7 @@ async def repeat_listing(event):
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def start(event):
     if event.sender_id not in schedule_tasks:
-        cleanup(event.sender_id)
+        cleanup_draft(event.sender_id)
     await show_menu(event)
 
 
@@ -293,8 +347,14 @@ async def callbacks(event):
             await event.respond("An automatic listing is already active. Stop it before creating another listing.", buttons=[[Button.inline("⏹ Stop automatic posting", b"stop_schedule")]])
             return
         cleanup(uid)
-        states[uid] = Listing()
+        new_listing(uid)
         await event.respond("📸 Send the apartment photos.\n\nYou can send up to 10 photos.\nWhen you're finished, press Done.", buttons=[[Button.inline("✅ Done", b"done"), Button.inline("❌ Cancel", b"cancel")]])
+    elif action == b"add_another":
+        if uid in schedule_tasks:
+            await event.answer("Stop automatic posting before adding a listing.", alert=True)
+            return
+        new_listing(uid)
+        await event.respond("📸 Send the next apartment's photos.\n\nYou can send up to 10 photos.\nWhen you're finished, press Done.", buttons=[[Button.inline("✅ Done", b"done"), Button.inline("❌ Cancel all", b"cancel")]])
     elif action == b"done":
         state = states.get(uid)
         if not state or not state.photos:
@@ -307,8 +367,19 @@ async def callbacks(event):
         await event.respond("❌ Listing cancelled.")
         await show_menu(event)
     elif action == b"publish":
+        state = states.get(uid)
+        if not state or not state.photos or state.step < len(FIELDS):
+            await event.respond("This listing is not ready yet.")
+            return
+        states.pop(uid, None)
+        listing_queues.setdefault(uid, []).append(state)
+        await show_queue(event)
+    elif action == b"start_schedule":
         if uid in schedule_tasks:
             await event.answer("Automatic posting is already active.", alert=True)
+            return
+        if not listing_queues.get(uid):
+            await event.respond("Add at least one listing before starting automatic posting.")
             return
         schedule_tasks[uid] = asyncio.create_task(repeat_listing(event))
     elif action == b"stop_schedule":
