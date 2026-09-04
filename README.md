@@ -37,4 +37,18 @@ Railway's normal deployment filesystem is temporary. To keep connected Telegram 
 4. Keep `SESSION_ENCRYPTION_KEY` unchanged. Changing it makes previously stored sessions unreadable.
 
 The encrypted SQLite database will then be stored at `/data/velven.db`. Run only one service replica when using SQLite.
+
+## MyHome.ge imports on Railway
+
+MyHome.ge may reject requests from Railway's data-center IP addresses with HTTP
+403. If that happens, configure an HTTP(S) proxy that is permitted to access
+MyHome.ge by adding this Railway variable:
+
+```text
+MYHOME_PROXY=http://username:password@proxy-host:port
+```
+
+The proxy is used for listing pages and their images. Keep its credentials in
+Railway variables; do not commit them to this repository. Redeploy the service
+after adding or changing the variable.
 "# Velven-Upload-Bot" 

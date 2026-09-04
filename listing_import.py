@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from io import BytesIO
 from pathlib import Path
@@ -10,6 +11,7 @@ from PIL import Image, ImageOps
 
 ALLOWED_HOSTS = {"myhome.ge", "www.myhome.ge", "home.ss.ge", "ss.ge", "www.ss.ge"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
+MYHOME_PROXY = os.getenv("MYHOME_PROXY", "").strip()
 
 DISTRICTS_IN_URL = {
     "saburtalo": "saburtalo", "saburtaloze": "saburtalo",
@@ -23,6 +25,19 @@ DISTRICTS_IN_URL = {
     "mtatsminda": "mtatsminda", "mtatsmindaze": "mtatsminda",
     "krtsanisi": "krtsanisi", "krtsanisshi": "krtsanisi",
 }
+
+
+def _request(url: str) -> requests.Response:
+    """Fetch a page or image, optionally through a proxy configured by Railway."""
+    proxies = None
+    if MYHOME_PROXY:
+        proxies = {"http": MYHOME_PROXY, "https": MYHOME_PROXY}
+    return requests.get(
+        url,
+        headers=HEADERS,
+        proxies=proxies,
+        timeout=25,
+    )
 
 
 def supported_url(text: str) -> str | None:
@@ -108,7 +123,7 @@ def _add_image(images: list[str], source: str | None, page_url: str):
 
 
 def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
-    response = requests.get(url, headers=HEADERS, timeout=25)
+    response = _request(url)
     response.raise_for_status()
     if urlparse(response.url).hostname not in ALLOWED_HOSTS:
         raise ValueError("Listing redirected to an unsupported website")
@@ -177,7 +192,7 @@ def download_images(urls: list[str], folder: Path) -> list[Path]:
         if len(paths) >= 10:
             break
         try:
-            response = requests.get(url, headers=HEADERS, timeout=25)
+            response = _request(url)
             response.raise_for_status()
             if not response.headers.get("content-type", "").startswith("image/"):
                 continue
