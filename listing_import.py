@@ -1,17 +1,19 @@
 import json
 import os
 import re
+import threading
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests
 from PIL import Image, ImageOps
 
 ALLOWED_HOSTS = {"myhome.ge", "www.myhome.ge", "home.ss.ge", "ss.ge", "www.ss.ge"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 MYHOME_PROXY = os.getenv("MYHOME_PROXY", "").strip()
+_thread_state = threading.local()
 
 DISTRICTS_IN_URL = {
     "saburtalo": "saburtalo", "saburtaloze": "saburtalo",
@@ -27,16 +29,28 @@ DISTRICTS_IN_URL = {
 }
 
 
-def _request(url: str) -> requests.Response:
-    """Fetch a page or image, optionally through a proxy configured by Railway."""
+def _session() -> requests.Session:
+    session = getattr(_thread_state, "session", None)
+    if session is None:
+        session = requests.Session(impersonate="chrome")
+        _thread_state.session = session
+    return session
+
+
+def _request(url: str, *, referer: str | None = None) -> requests.Response:
+    """Fetch using a Chrome TLS/HTTP fingerprint and persistent cookies."""
     proxies = None
     if MYHOME_PROXY:
         proxies = {"http": MYHOME_PROXY, "https": MYHOME_PROXY}
-    return requests.get(
+    headers = dict(HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    return _session().get(
         url,
-        headers=HEADERS,
+        headers=headers,
         proxies=proxies,
         timeout=25,
+        allow_redirects=True,
     )
 
 
@@ -123,7 +137,14 @@ def _add_image(images: list[str], source: str | None, page_url: str):
 
 
 def scrape_listing(url: str) -> tuple[dict[str, str], list[str]]:
-    response = _request(url)
+    # First visit establishes the same country/session cookies that MyHome gives
+    # a normal browser before it opens a listing.
+    if urlparse(url).hostname in {"myhome.ge", "www.myhome.ge"}:
+        home_url = "https://www.myhome.ge/ka/"
+        _request(home_url)
+        response = _request(url, referer=home_url)
+    else:
+        response = _request(url)
     response.raise_for_status()
     if urlparse(response.url).hostname not in ALLOWED_HOSTS:
         raise ValueError("Listing redirected to an unsupported website")
@@ -206,6 +227,6 @@ def download_images(urls: list[str], folder: Path) -> list[Path]:
             path = folder / f"imported-{len(paths) + 1}.jpg"
             path.write_bytes(response.content)
             paths.append(path)
-        except (requests.RequestException, OSError):
+        except (requests.RequestsError, OSError):
             continue
     return paths

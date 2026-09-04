@@ -40,9 +40,10 @@ The encrypted SQLite database will then be stored at `/data/velven.db`. Run only
 
 ## MyHome.ge imports on Railway
 
-MyHome.ge may reject requests from Railway's data-center IP addresses with HTTP
-403. If that happens, configure an HTTP(S) proxy that is permitted to access
-MyHome.ge by adding this Railway variable:
+The importer uses a Chrome-compatible network fingerprint and establishes a
+cookie session before requesting a MyHome listing. MyHome.ge may still reject
+some Railway data-center IP addresses with HTTP 403. If that happens, an
+optional HTTP(S) proxy can be configured with this Railway variable:
 
 ```text
 MYHOME_PROXY=http://username:password@proxy-host:port

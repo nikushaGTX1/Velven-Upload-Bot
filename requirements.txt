@@ -6,3 +6,4 @@ cryptography==45.0.6
 python-dotenv==1.1.1
 requests==2.32.4
 beautifulsoup4==4.13.4
+curl_cffi==0.16.3
